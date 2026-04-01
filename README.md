@@ -124,7 +124,7 @@ pip install numpy scipy pandas matplotlib nilearn nibabel statsmodels
 Multiscale entropy across timescales 1–6 for BOLD and ASL at REST1 and REST2.  
 ASL shows consistently higher complexity at fine scales; both modalities trend upward with timescale.
 
-![MSE curves](results/bold_asl_mse_curves.png)
+<img width="1050" height="600" alt="image" src="https://github.com/user-attachments/assets/e30d2230-780f-45c0-ba39-7f0f7f9a1c98" />
 
 ---
 
@@ -133,7 +133,7 @@ ASL shows consistently higher complexity at fine scales; both modalities trend u
 REST2 − REST1 MSE difference per timescale in the DMN.  
 Blue bars indicate p < 0.05 (paired t-test). Pattern reflects test-retest reliability of session differences.
 
-![Session difference](results/bold_asl_session_diff.png)
+<img width="1784" height="617" alt="image" src="https://github.com/user-attachments/assets/a8e96ed6-5cc3-464b-b7b7-a6c1922c03ea" />
 
 ---
 
@@ -142,7 +142,7 @@ Blue bars indicate p < 0.05 (paired t-test). Pattern reflects test-retest reliab
 BOLD has lower DMN complexity than ASL at fine timescales (1–4), converging at coarser scales.  
 Blue bar (scale 3) reached p < 0.05 in the 2-subject pilot.
 
-![Modality difference](results/bold_asl_modality_diff.png)
+<img width="900" height="600" alt="image" src="https://github.com/user-attachments/assets/eb50124c-b341-41db-80ae-42cb36bee226" />
 
 ---
 
