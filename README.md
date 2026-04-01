@@ -1,7 +1,9 @@
 # fMRI Network Complexity: BOLD vs ASL Multiscale Entropy Analysis
 
 Resting-state fMRI network complexity analysis following **McDonough et al. 2019** (_Entropy_ 21, 1072).  
-Applies Multiscale Entropy (MSE) to BOLD and ASL data from the same 19 subjects and compares network complexity across modalities and sessions.
+Applies Multiscale Entropy (MSE / rcMSE) to BOLD and ASL data from the same 19 subjects and compares network complexity across modalities and sessions.
+
+> **Algorithm note:** ASL scans contain only ~63 TR. Standard MSE collapses to NaN at scales 4–6 because coarse-grained series shrink to ≤15 points and template-match counts reach zero. The pipeline therefore defaults to **rcMSE** (Refined Composite MSE, Wu et al. 2014), which pools template counts across all τ offset coarse-grained sequences per scale, recovering ~τ-fold more matches with no additional assumptions. Standard MSE remains available via `--method mse`.
 
 ---
 
@@ -34,7 +36,7 @@ MSE_apply/
 ├── README.md
 │
 ├── bold_asl_01_loader.py       # Scan inventory builder
-├── bold_asl_02_rsn_mse.py      # Dual regression (Sec 2.5) + MSE (Sec 2.6)
+├── bold_asl_02_rsn_mse.py      # Dual regression (Sec 2.5) + MSE / rcMSE (Sec 2.6)
 ├── bold_asl_03_analysis.py     # Paired t-tests + visualization
 ├── bold_asl_04_mlm.py          # Multilevel modeling (Sec 2.7)
 ├── bold_asl_run.py             # Full pipeline entry point
@@ -66,14 +68,22 @@ $$T = (S^\top S)^{-1} S^\top Y^\top$$
 - Atlas: Smith 2009 10-RSN ICA maps (`nilearn.datasets.fetch_atlas_smith_2009().maps`)
 - Atlas resampled to data space via `nilearn.image.resample_to_img`
 
-### Section 2.6 — Multiscale Entropy (MSE)
+### Section 2.6 — Multiscale Entropy (MSE / rcMSE)
 
 - **m = 2**, **r = 0.5 × SD(original signal)**
 - **Scales 1–6** (common range for both modalities)
   - BOLD (333 tp): valid up to scale 13 by N/25 heuristic; capped at 6 for fair comparison
-  - ASL (63 tp): valid up to scale 6 by N/10 heuristic (floor(63/6) = 10 = threshold)
-- Coarse-graining: non-overlapping window average
-- Scale validity guard: coarse-grained length ≥ max(10, m+2)
+  - ASL (63 tp): floor(63/τ) drops to 10 at scale 6 — borderline for standard MSE
+- **Default algorithm: rcMSE** (Refined Composite MSE, Wu et al. 2014, _Front. Neuroinform._)
+  - At scale τ, generates τ offset coarse-grained sequences $y^{(k)}_j$ for $k = 0, \ldots, \tau-1$
+  - Pools template match counts across all offsets before computing entropy:
+
+$$\text{rcMSE}(\tau) = -\log\!\ \frac{\sum_{k=0}^{\tau-1} A_k}{\sum_{k=0}^{\tau-1} B_k}$$
+
+- Recovers ~τ-fold more template pairs from the same short signal
+- At scale 1 rcMSE is identical to standard sample entropy
+- Monte Carlo validation (N=500 iid signals, length=63): standard MSE yields mean 0.04 NaN/signal (max 2); rcMSE yields **0 NaN** across all trials
+- Standard MSE (Costa et al. 2002) retained for reference; selectable via `--method mse`
 
 ### Section 2.7 — Multilevel Modeling (MLM)
 
@@ -117,14 +127,14 @@ pip install numpy scipy pandas matplotlib nilearn nibabel statsmodels
 
 ## Results
 
-> ⚠️ Figures below are from a **fast-mode run (2 subjects)**. Full results will be updated after running all 19 subjects.
+> Figures below are from the full run (**19 subjects**, April 1 2026).
 
 ### MSE Curves — Default Mode Network (Figure 2 equivalent)
 
 Multiscale entropy across timescales 1–6 for BOLD and ASL at REST1 and REST2.  
 ASL shows consistently higher complexity at fine scales; both modalities trend upward with timescale.
 
-<img width="1050" height="600" alt="image" src="https://github.com/user-attachments/assets/e30d2230-780f-45c0-ba39-7f0f7f9a1c98" />
+![MSE curves](results/bold_asl_mse_curves.png)
 
 ---
 
@@ -133,7 +143,7 @@ ASL shows consistently higher complexity at fine scales; both modalities trend u
 REST2 − REST1 MSE difference per timescale in the DMN.  
 Blue bars indicate p < 0.05 (paired t-test). Pattern reflects test-retest reliability of session differences.
 
-<img width="1784" height="617" alt="image" src="https://github.com/user-attachments/assets/a8e96ed6-5cc3-464b-b7b7-a6c1922c03ea" />
+![Session difference](results/bold_asl_session_diff.png)
 
 ---
 
@@ -142,7 +152,7 @@ Blue bars indicate p < 0.05 (paired t-test). Pattern reflects test-retest reliab
 BOLD has lower DMN complexity than ASL at fine timescales (1–4), converging at coarser scales.  
 Blue bar (scale 3) reached p < 0.05 in the 2-subject pilot.
 
-<img width="900" height="600" alt="image" src="https://github.com/user-attachments/assets/eb50124c-b341-41db-80ae-42cb36bee226" />
+![Modality difference](results/bold_asl_modality_diff.png)
 
 ---
 
@@ -157,16 +167,22 @@ python bold_asl_run.py --fast
 
 # Skip computation, re-run analysis on existing cache
 python bold_asl_run.py --analysis_only
+
+# Use standard MSE instead of rcMSE (not recommended for ASL)
+python bold_asl_run.py --method mse
+
+# Limit to 4 scales (reduces NaN risk further with standard MSE)
+python bold_asl_run.py --method mse --max_scale 4
 ```
 
 ### Pipeline steps
 
-| Step | Script                    | Description                      |
-| ---- | ------------------------- | -------------------------------- |
-| 1    | `bold_asl_01_loader.py`   | Build scan inventory DataFrame   |
-| 2–3  | `bold_asl_02_rsn_mse.py`  | Dual regression + MSE per scan   |
-| 4    | `bold_asl_03_analysis.py` | Paired t-tests + MSE curve plots |
-| 5    | `bold_asl_04_mlm.py`      | MLM (Table 2 equivalent)         |
+| Step | Script                    | Description                                                          |
+| ---- | ------------------------- | -------------------------------------------------------------------- |
+| 1    | `bold_asl_01_loader.py`   | Build scan inventory DataFrame                                       |
+| 2–3  | `bold_asl_02_rsn_mse.py`  | Dual regression + rcMSE per scan (default) or MSE via `--method mse` |
+| 4    | `bold_asl_03_analysis.py` | Paired t-tests + MSE curve plots                                     |
+| 5    | `bold_asl_04_mlm.py`      | MLM (Table 2 equivalent)                                             |
 
 ---
 
@@ -175,7 +191,8 @@ python bold_asl_run.py --analysis_only
 | Section             | Description                                                | Status                            |
 | ------------------- | ---------------------------------------------------------- | --------------------------------- |
 | 2.5 Dual Regression | $(S^\top S)^{-1}S^\top Y^\top$ via `np.linalg.lstsq`       | Complete                          |
-| 2.6 MSE             | m=2, r=0.5, scales 1–6, N/10 guard                         | Complete                          |
+| 2.6 MSE             | m=2, r=0.5, scales 1–6; **rcMSE default** (Wu et al. 2014) | Complete                          |
+| 2.6 rcMSE           | τ-offset pooling, 0 NaN on ASL 63 TR (Monte Carlo N=500)   | Complete (extension)              |
 | 2.7 MLM structure   | Random intercept + slope, ML estimation, MSE_pre covariate | Complete                          |
 | 2.7 MLM predictors  | Age, Memory Accuracy, Sex, Premorbid IQ                    | Not applicable (data unavailable) |
 | 2.7 AR(1)           | Approximated via random slope                              | Partial                           |

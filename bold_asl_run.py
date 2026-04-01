@@ -38,10 +38,13 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CACHE_PATH  = os.path.join(RESULTS_DIR, "bold_asl_mse_raw.csv")
 
-# MSE parameters (McDonough et al. 2019, Section 2.6)
+# MSE / rcMSE parameters (McDonough et al. 2019, Section 2.6)
+# method='rcmse' (Wu et al. 2014) is the default — recommended for short
+# ASL series (~63 TR) where standard MSE yields NaN at scales 4-6.
 M          = 2
 R_FACTOR   = 0.5
 MAX_SCALE  = 6   # common upper bound for BOLD (333tp) and ASL (63tp)
+METHOD     = "rcmse"  # 'rcmse' | 'mse'
 
 SCALE_COLS = [f"scale_{s}" for s in range(1, MAX_SCALE + 1)]
 
@@ -65,7 +68,8 @@ def _import_modules():
 
 def compute_all(inventory: pd.DataFrame,
                 rsn_mse_mod,
-                max_scale: int = MAX_SCALE) -> pd.DataFrame:
+                max_scale: int = MAX_SCALE,
+                method: str = METHOD) -> pd.DataFrame:
     """
     For every scan in inventory: extract RSN time series → compute MSE.
     Returns a DataFrame with one row per (scan × RSN).
@@ -83,7 +87,8 @@ def compute_all(inventory: pd.DataFrame,
             mse = rsn_mse_mod.compute_mse_all_rsns(ts,
                                                     max_scale=max_scale,
                                                     m=M,
-                                                    r_factor=R_FACTOR)
+                                                    r_factor=R_FACTOR,
+                                                    method=method)
             for rsn_i in range(mse.shape[0]):
                 rec = dict(
                     subject=row.subject,
@@ -113,6 +118,9 @@ def parse_args():
                    help="Skip computation, run analysis on existing cache")
     p.add_argument("--max_scale",     type=int, default=MAX_SCALE,
                    help=f"Maximum MSE scale (default {MAX_SCALE})")
+    p.add_argument("--method",         type=str, default=METHOD,
+                   choices=["rcmse", "mse"],
+                   help="Entropy algorithm: rcmse (default, short series) or mse (Costa 2002)")
     return p.parse_args()
 
 
@@ -148,8 +156,9 @@ def main():
         print(f"\n=== Skipping computation -- loading cache: {CACHE_PATH} ===")
     else:
         print("\n=== Steps 2-3: RSN extraction + MSE computation ===")
-        print(f"  Parameters: m={M}, r={R_FACTOR}*SD, scales 1-{args.max_scale}")
-        raw_df = compute_all(inv, rsn_mse, max_scale=args.max_scale)
+        print(f"  Parameters: m={M}, r={R_FACTOR}*SD, scales 1-{args.max_scale}, method={args.method}")
+        raw_df = compute_all(inv, rsn_mse, max_scale=args.max_scale,
+                             method=args.method)
         raw_df.to_csv(CACHE_PATH, index=False)
         print(f"\n  Cached: {CACHE_PATH}  ({len(raw_df)} rows)")
 

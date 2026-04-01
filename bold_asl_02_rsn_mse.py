@@ -1,6 +1,6 @@
 """
 bold_asl_02_rsn_mse.py
-RSN time-series extraction + MSE computation.
+RSN time-series extraction + MSE / rcMSE computation.
 
 Follows McDonough et al. 2019 (Entropy) Sections 2.5–2.6:
 
@@ -11,6 +11,14 @@ Follows McDonough et al. 2019 (Entropy) Sections 2.5–2.6:
   Section 2.6  — MSE with m=2, r=0.5 * SD(original signal), scales 1..max_scale.
                  Upper bound: N/25 (paper used 175/25=7 scales).
                  For fair BOLD–ASL comparison we cap at scale 6 (63/10 ≈ 6).
+
+  rcMSE extension (Wu et al. 2014, Front. Neuroinform.):
+                 For ASL data (~63 TR), standard MSE yields NaN at scales 4-6
+                 because each coarse-grained series has only 10-15 points and
+                 pattern counts collapse to zero.  rcMSE creates τ offset
+                 coarse-grained series per scale and pools their template match
+                 counts before taking the log — recovering ~τ-fold more matches
+                 with no additional assumptions.  This is the default method.
 """
 
 import warnings
@@ -106,11 +114,27 @@ def extract_rsn_timeseries(nii_path: str, standardize: bool = True) -> np.ndarra
     return ts
 
 
-# ── MSE computation ──────────────────────────────────────────────────────────
+# ── MSE / rcMSE computation ──────────────────────────────────────────────────
 def _coarse_grain(x: np.ndarray, scale: int) -> np.ndarray:
-    """Non-overlapping window average (Costa et al. 2002)."""
+    """Non-overlapping window average starting at offset 0 (Costa et al. 2002)."""
     n = len(x) - (len(x) % scale)
     return x[:n].reshape(-1, scale).mean(axis=1)
+
+
+def _coarse_grain_k(x: np.ndarray, scale: int, k: int) -> np.ndarray:
+    """
+    k-th offset coarse-grained sequence (0-indexed k, 0 <= k < scale).
+
+    y_j = mean( x[k + j*scale : k + (j+1)*scale] )
+
+    Used by rcMSE to generate τ offset sequences per scale, recovering
+    ~τ-fold more template pairs from the same short signal.
+    """
+    x_off = x[k:]
+    n     = len(x_off) - (len(x_off) % scale)
+    if n == 0:
+        return np.array([], dtype=np.float64)
+    return x_off[:n].reshape(-1, scale).mean(axis=1)
 
 
 def _sample_entropy(x: np.ndarray, m: int, r: float) -> float:
@@ -126,7 +150,6 @@ def _sample_entropy(x: np.ndarray, m: int, r: float) -> float:
     tm  = x[idx[:, None] + np.arange(m)]        # (N-m, m)
     tm1 = x[idx[:, None] + np.arange(m + 1)]    # (N-m, m+1)
 
-    # Pairwise Chebyshev (upper triangle → no self-pairs, no double-count)
     diff_m  = np.abs(tm[:, None, :]  - tm[None, :, :])    # (N-m, N-m, m)
     diff_m1 = np.abs(tm1[:, None, :] - tm1[None, :, :])   # (N-m, N-m, m+1)
 
@@ -142,13 +165,27 @@ def _sample_entropy(x: np.ndarray, m: int, r: float) -> float:
     return float(-np.log(A / B)) if A > 0 else np.nan
 
 
+def _template_counts(cg: np.ndarray, m: int, r: float):
+    """Return (A, B) for a single coarse-grained sequence."""
+    N = len(cg)
+    if N < m + 2:
+        return 0, 0
+    idx  = np.arange(N - m)
+    tm   = cg[idx[:, None] + np.arange(m)]
+    tm1  = cg[idx[:, None] + np.arange(m + 1)]
+    cheb_m  = np.abs(tm[:, None, :] - tm[None, :, :]).max(axis=2)
+    cheb_m1 = np.abs(tm1[:, None, :] - tm1[None, :, :]).max(axis=2)
+    mask = np.triu(np.ones((N - m, N - m), dtype=bool), k=1)
+    return int(np.sum(cheb_m1[mask] <= r)), int(np.sum(cheb_m[mask] <= r))
+
+
 def compute_mse(x: np.ndarray, max_scale: int,
                 m: int = 2, r_factor: float = 0.5) -> np.ndarray:
     """
-    MSE curve for 1-D time series x.
+    Standard MSE curve for 1-D time series x (Costa et al. 2002).
 
     r is fixed as r_factor * SD(original signal) — not the coarse-grained
-    signal — following the convention of McDonough & Nashiro 2014 (ref 28).
+    signal — following McDonough & Nashiro 2014 (ref 28).
 
     Returns
     -------
@@ -158,31 +195,73 @@ def compute_mse(x: np.ndarray, max_scale: int,
     mse = np.full(max_scale, np.nan)
     for s in range(1, max_scale + 1):
         cg = _coarse_grain(x, s)
-        # N/10 heuristic: coarse-grained length must be >= 10 for reliable
-        # sample entropy estimates (relaxed from N/25 to allow ASL scale 1-6
-        # with 63 tp; floor(63/6)=10 satisfies this boundary exactly).
         if len(cg) >= max(10, m + 2):
             mse[s - 1] = _sample_entropy(cg, m, r)
     return mse
 
 
+def compute_rcmse(x: np.ndarray, max_scale: int,
+                  m: int = 2, r_factor: float = 0.5) -> np.ndarray:
+    """
+    Refined Composite MSE (rcMSE) — Wu et al. 2014, Front. Neuroinform.
+
+    At scale τ, creates τ offset coarse-grained sequences (k = 0 … τ-1) and
+    pools their template match counts before computing entropy:
+
+        rcMSE(τ) = -log( ΣA_k / ΣB_k )
+
+    This recovers ~τ-fold more template pairs from the same short signal,
+    dramatically reducing NaN rates for time series with N < 100 (e.g.
+    ASL scans with ~63 TR where standard MSE collapses at scales 4-6).
+
+    At scale 1 rcMSE is identical to standard sample entropy.
+
+    r is fixed as r_factor * SD(original signal) — same convention as
+    compute_mse() for cross-scale and cross-modality comparability.
+
+    Returns
+    -------
+    rcmse : np.ndarray  shape (max_scale,), NaN only when ΣB_k == 0
+            after pooling all τ offset sequences.
+    """
+    r     = r_factor * float(np.std(x, ddof=1))
+    rcmse = np.full(max_scale, np.nan)
+    for s in range(1, max_scale + 1):
+        A_total = 0
+        B_total = 0
+        for k in range(s):
+            cg = _coarse_grain_k(x, s, k)
+            A_k, B_k = _template_counts(cg, m, r)
+            A_total += A_k
+            B_total += B_k
+        if B_total > 0:
+            rcmse[s - 1] = float(-np.log(A_total / B_total)) if A_total > 0 else np.nan
+    return rcmse
+
+
 def compute_mse_all_rsns(ts_matrix: np.ndarray,
                           max_scale: int = 6,
                           m: int = 2,
-                          r_factor: float = 0.5) -> np.ndarray:
+                          r_factor: float = 0.5,
+                          method: str = "rcmse") -> np.ndarray:
     """
-    Compute MSE for every RSN time series.
+    Compute MSE or rcMSE for every RSN time series.
 
     Parameters
     ----------
     ts_matrix : (T, 10)
+    method    : 'rcmse' (default, recommended for ASL / short series) or
+                'mse'   (standard Costa 2002, for reference / long BOLD)
 
     Returns
     -------
     out : (10, max_scale)
     """
+    if method not in ("rcmse", "mse"):
+        raise ValueError(f"method must be 'rcmse' or 'mse', got {method!r}")
+    _fn   = compute_rcmse if method == "rcmse" else compute_mse
     n_rsn = ts_matrix.shape[1]
     out   = np.full((n_rsn, max_scale), np.nan)
     for i in range(n_rsn):
-        out[i] = compute_mse(ts_matrix[:, i], max_scale, m, r_factor)
+        out[i] = _fn(ts_matrix[:, i], max_scale, m, r_factor)
     return out
