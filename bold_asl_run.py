@@ -35,6 +35,19 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+
+# ── Auto-detect R (nlme AR(1) support) ───────────────────────────────────────
+# winget installs R to %LOCALAPPDATA%\Programs\R\<version>\bin by default.
+# If Rscript is not already on PATH, probe the known location and prepend it.
+import shutil as _shutil
+if _shutil.which("Rscript") is None:
+    _r_base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "R")
+    if os.path.isdir(_r_base):
+        for _ver in sorted(os.listdir(_r_base), reverse=True):
+            _rbin = os.path.join(_r_base, _ver, "bin")
+            if os.path.exists(os.path.join(_rbin, "Rscript.exe")):
+                os.environ["PATH"] = _rbin + os.pathsep + os.environ.get("PATH", "")
+                break
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CACHE_PATH  = os.path.join(RESULTS_DIR, "bold_asl_mse_raw.csv")
 

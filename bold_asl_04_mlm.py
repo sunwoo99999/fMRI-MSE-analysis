@@ -10,9 +10,23 @@ Paper's specification (lme4 equivalent):
   - All timescales modeled simultaneously (long format)
   - Covariates: MSE_pre (available), Sex/IQ (not available in our dataset)
 
-  Note: AR(1) autocorrelation within subject is approximated by the random
-  slope (captures systematic within-subject timescale trends). True AR(1)
-  requires lme4/nlme in R; statsmodels MixedLM does not support it natively.
+  AR(1) implementation:
+    When R (Rscript in PATH) and bold_asl_mlm_ar1.R are present, the analysis
+    calls nlme::lme with corAR1() — exact match for McDonough 2019 Sec 2.7.
+    Without R, statsmodels MixedLM with a random slope is used as a fallback.
+
+  ── DESIGN LIMITATION (cannot be resolved in code) ───────────────────────
+  The paper measures MSE_post-encoding − MSE_pre-encoding: two resting scans
+  collected on the SAME day, bracketing a memory encoding task (64 face-pair
+  images).  The DV therefore captures awake consolidation processes.
+
+  Our data: REST1 and REST2 come from SEPARATE sessions (different days) with
+  no intervening encoding task recorded.  The DV here measures test-retest
+  change in network complexity, NOT memory consolidation.
+
+  Covariates Age and Memory Accuracy (paper Table 2) are also unavailable.
+  State these explicitly as design limitations in any manuscript.
+  ─────────────────────────────────────────────────────────────────────────
 
 Models implemented (matching Table 2 structure):
   Within-modality (BOLD or ASL, subjects with REST1+REST2):
@@ -27,6 +41,9 @@ Models implemented (matching Table 2 structure):
 """
 
 import os
+import shutil
+import subprocess
+import tempfile
 import warnings
 import numpy as np
 import pandas as pd
@@ -34,6 +51,12 @@ import matplotlib.pyplot as plt
 from statsmodels.regression.mixed_linear_model import MixedLM
 
 warnings.filterwarnings("ignore")
+
+# ── R / nlme availability check (AR(1) support) ───────────────────────────────
+_RSCRIPT       = shutil.which("Rscript")
+_R_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "bold_asl_mlm_ar1.R")
+_R_AVAILABLE   = (_RSCRIPT is not None) and os.path.exists(_R_SCRIPT_PATH)
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 SCALE_COLS   = [f"scale_{s}" for s in range(1, 7)]
@@ -63,12 +86,115 @@ def _to_long(df_wide: pd.DataFrame) -> pd.DataFrame:
     ).drop(columns="scale_str")
 
 
-def _fit_mlm(endog, exog_df, groups, method="ml"):
+# ── R-based MLM with AR(1) ───────────────────────────────────────────────────
+_R_TERM_MAP = {
+    "(Intercept)": "intercept",
+    "ts_z":        "timescale",
+    "pre_z":       "mse_pre",
+}
+
+
+class _RResult:
     """
-    Fit MLM with random intercept + random slope for Timescale.
-    Falls back to random-intercept-only if random slope causes convergence failure.
-    Returns (result, random_slope_used).
+    Wraps nlme::lme CSV output (from bold_asl_mlm_ar1.R) to mimic the
+    statsmodels MixedLMResults interface expected by _extract_fixed().
     """
+    def __init__(self, csv_path: str):
+        df = pd.read_csv(csv_path)
+
+        # Detect failure: success rows always contain a "Value" column
+        if "Value" not in df.columns:
+            self.converged    = False
+            self.ar1_used     = False
+            self.random_slope = False
+            self.fe_params    = pd.Series(dtype=float)
+            self.bse_fe       = pd.Series(dtype=float)
+            self.tvalues      = pd.Series(dtype=float)
+            self.pvalues      = pd.Series(dtype=float)
+            return
+
+        # Map R term names → Python names expected by _extract_fixed()
+        df["term"] = df["term"].map(_R_TERM_MAP).fillna(df["term"])
+        df = df.set_index("term")
+
+        self.converged    = True
+        self.ar1_used     = bool(int(df["ar1"].iloc[0]))  if "ar1" in df.columns else False
+        self.random_slope = bool(int(df["rs"].iloc[0]))   if "rs"  in df.columns else False
+        self.fe_params    = df["Value"]
+        self.bse_fe       = df["Std.Error"]
+        # nlme tTable uses "t-value" / "p-value"; handle both naming styles
+        t_col = "t-value" if "t-value" in df.columns else "t.value"
+        p_col = "p-value" if "p-value" in df.columns else "p.value"
+        self.tvalues      = df[t_col]
+        self.pvalues      = df[p_col]
+
+
+def _fit_mlm_r(endog, exog_df, groups, timescale_int) -> tuple:
+    """
+    Call bold_asl_mlm_ar1.R via subprocess for AR(1)-correct MLM.
+    Returns (_RResult, random_slope_bool) or (None, None) on any failure.
+
+    Column mapping sent to R:
+      dv        <- endog
+      ts_z      <- exog_df["timescale"]   (already z-scored in calling code)
+      timescale <- timescale_int           (integer 1-6, for corAR1 ordering)
+      subject   <- groups
+      pre_z     <- exog_df["mse_pre"]     (if present)
+    """
+    include_pre = "mse_pre" in exog_df.columns
+
+    r_df = pd.DataFrame({
+        "dv":        endog.values,
+        "ts_z":      exog_df["timescale"].values,   # z-scored timescale
+        "timescale": np.asarray(timescale_int),      # integer 1-6
+        "subject":   groups.values,
+    })
+    if include_pre:
+        r_df["pre_z"] = exog_df["mse_pre"].values
+    r_df = r_df.dropna(subset=["dv", "ts_z"])
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            in_csv  = os.path.join(tmp, "mlm_in.csv")
+            out_csv = os.path.join(tmp, "mlm_out.csv")
+            r_df.to_csv(in_csv, index=False)
+            proc = subprocess.run(
+                [_RSCRIPT, _R_SCRIPT_PATH, in_csv, out_csv, str(include_pre)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if not os.path.exists(out_csv):
+                return None, None
+            res = _RResult(out_csv)
+            return res, res.random_slope
+    except Exception:
+        return None, None
+
+
+def _fit_mlm(endog, exog_df, groups, timescale_int=None, method="ml"):
+    """
+    Fit MLM.  Priority order:
+      1) R nlme::lme + corAR1()  — if Rscript available (exact paper match)
+      2) statsmodels MixedLM     — fallback (no explicit AR(1))
+
+    Parameters
+    ----------
+    endog        : pd.Series  dependent variable
+    exog_df      : pd.DataFrame  fixed effects (columns: intercept, timescale,
+                                 optionally mse_pre; timescale is z-scored)
+    groups       : pd.Series  subject IDs
+    timescale_int: array-like  integer timescales 1-6 (needed for AR(1) ordering)
+
+    Returns
+    -------
+    (result, random_slope_used)
+    """
+    # ── Path 1: R nlme with AR(1) ─────────────────────────────────────────────
+    if _R_AVAILABLE and timescale_int is not None:
+        res_r, rs_r = _fit_mlm_r(endog, exog_df, groups, timescale_int)
+        if res_r is not None and res_r.converged:
+            return res_r, rs_r
+
+    # ── Path 2: statsmodels fallback (no AR(1)) ───────────────────────────────
     exog_re = exog_df[["intercept", "timescale"]]
     try:
         model  = MixedLM(endog, exog_df, groups=groups, exog_re=exog_re)
@@ -77,7 +203,6 @@ def _fit_mlm(endog, exog_df, groups, method="ml"):
             raise ValueError("did not converge")
         return result, True
     except Exception:
-        # fallback: random intercept only
         model  = MixedLM(endog, exog_df, groups=groups)
         result = model.fit(method=method, reml=False, disp=False)
         return result, False
@@ -155,11 +280,13 @@ def mlm_within_modality(df_avg: pd.DataFrame) -> pd.DataFrame:
                     exog = long[["intercept", "timescale_z"]]
                     exog.columns = ["intercept", "timescale"]
 
-                res, rslope = _fit_mlm(endog, exog.copy(), groups)
+                res, rslope = _fit_mlm(endog, exog.copy(), groups,
+                                       timescale_int=long["timescale"])
 
                 rec = dict(modality=modality, rsn_idx=rsn_i,
                            rsn_name=RSN_NAMES[rsn_i], model=model_id,
                            n_subjects=len(subs_both), random_slope=rslope,
+                           ar1_used=getattr(res, "ar1_used", False),
                            converged=res.converged)
                 for term in ["intercept", "timescale", "mse_pre"]:
                     c, se, z, p = _extract_fixed(res, term)
@@ -222,11 +349,13 @@ def mlm_cross_modality(df_avg: pd.DataFrame) -> pd.DataFrame:
                 exog = long[["intercept", "timescale_z"]]
                 exog.columns = ["intercept", "timescale"]
 
-            res, rslope = _fit_mlm(endog, exog.copy(), groups)
+            res, rslope = _fit_mlm(endog, exog.copy(), groups,
+                                   timescale_int=long["timescale"])
 
             rec = dict(rsn_idx=rsn_i, rsn_name=RSN_NAMES[rsn_i],
                        model=model_id, n_subjects=len(subs),
-                       random_slope=rslope, converged=res.converged)
+                       random_slope=rslope, ar1_used=getattr(res, "ar1_used", False),
+                       converged=res.converged)
             for term in ["intercept", "timescale", "mse_pre"]:
                 c, se, z, p = _extract_fixed(res, term)
                 rec[f"β_{term}"]  = round(c,  4) if not np.isnan(c) else np.nan
