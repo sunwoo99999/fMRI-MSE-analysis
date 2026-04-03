@@ -3,7 +3,7 @@
 Resting-state fMRI network complexity analysis following **McDonough et al. 2019** (_Entropy_ 21, 1072).  
 Applies rcMSE (Refined Composite MSE) to BOLD and ASL data from the same 19 subjects and compares network complexity across modalities and sessions.
 
-> **Algorithm note:** ASL scans contain only ~63 TR. Standard MSE collapses to NaN at scales 4–6 because coarse-grained series shrink to ≤15 points and template-match counts reach zero. The pipeline therefore defaults to **rcMSE** (Wu et al. 2014, _Front. Neuroinform._), which pools template counts across all τ offset coarse-grained sequences per scale, recovering ~τ-fold more matches with no additional assumptions. Standard MSE remains available via `--method mse`.
+> **Algorithm note:** ASL scans contain only ~63 TR. Standard MSE collapses to NaN at scales 4–6 because coarse-grained series shrink to ≤15 points and template-match counts reach zero. The pipeline therefore defaults to **rcMSE**, which pools template counts across all τ offset coarse-grained sequences per scale, recovering ~τ-fold more matches with no additional assumptions. Standard MSE remains available via `--method mse`.
 
 > **AR(1) note:** Section 2.7 MLM now uses **R `nlme::lme` with `corAR1()`** when Rscript is available — an exact match to the paper's autocorrelation structure. Python `statsmodels` (no AR(1)) is used as a fallback only when R is not installed.
 
@@ -77,7 +77,7 @@ $$T = (S^\top S)^{-1} S^\top Y^\top$$
 - **Scales 1–6** (common range for both modalities)
   - BOLD (333 tp): valid up to scale 13 by N/25 heuristic; capped at 6 for fair comparison
   - ASL (63 tp): floor(63/τ) drops to 10 at scale 6 — borderline for standard MSE
-- **Default algorithm: rcMSE** (Refined Composite MSE, Wu et al. 2014, _Front. Neuroinform._)
+- **Default algorithm: rcMSE**
   - At scale τ, generates τ offset coarse-grained sequences $y^{(k)}_j$ for $k = 0, \ldots, \tau-1$
   - Pools template match counts across all offsets before computing entropy:
 
@@ -94,28 +94,28 @@ $$\text{rcMSE}(\tau) = -\log\!\ \frac{\sum_{k=0}^{\tau-1} A_k}{\sum_{k=0}^{\tau-
 MSE_diff ~ Timescale + MSE_pre + (1 + Timescale | subject),  corAR1(~ timescale | subject)
 ```
 
-**AR(1) implementation (논문 exact match):**
+**AR(1) implementation (exact match to paper):**
 
-- 우선 경로: `bold_asl_mlm_ar1.R` → R `nlme::lme(correlation = corAR1(form = ~ timescale | subject), method = "ML")`
-- 대안 경로 (R 미설치 시): `statsmodels MixedLM` — AR(1) 없음, random slope으로 부분 보완
-- 결과 CSV에 `ar1_used` 컬럼으로 실제 사용된 모형 기록
+- Primary path: `bold_asl_mlm_ar1.R` → R `nlme::lme(correlation = corAR1(form = ~ timescale | subject), method = "ML")`
+- Fallback (if R not installed): `statsmodels MixedLM` — no AR(1), partially compensated by random slope
+- Results CSV includes `ar1_used` column to record which model was actually used
 
-**그 외 설정:**
+**Additional settings:**
 
 - Random intercept + random slope for Timescale
 - Maximum likelihood estimation (`method = "ML"`, `reml = FALSE`)
-- 예측변수 모두 z-score 표준화 후 투입
-- n < 3 또는 수렴 실패 시 random intercept only로 자동 fallback
+- All predictors z-score standardized before entry
+- Auto-fallback to random intercept only if n < 3 or convergence fails
 
-**⚠️ 실험 설계 한계 (코드로 해결 불가):**
+**Design Limitation:**
 
-| 논문                                              | 본 연구                                |
-| ------------------------------------------------- | -------------------------------------- |
-| REST_pre → 기억 인코딩 과제 → REST_post (같은 날) | REST1, REST2 = 별도 세션 (다른 날)     |
-| DV = 인코딩 직후 뇌의 기억 공고화(consolidation)  | DV = 세션 간 복잡도 변화 (test-retest) |
-| Age, Memory Accuracy, Sex, IQ 공변량              | 해당 변수 데이터 없음                  |
+| Paper                                                  | This study                                              |
+| ------------------------------------------------------ | ------------------------------------------------------- |
+| REST_pre → memory encoding task → REST_post (same day) | REST1, REST2 = separate sessions (different days)       |
+| DV = post-encoding memory consolidation                | DV = session-to-session complexity change (test-retest) |
+| Age, Memory Accuracy, Sex, IQ as covariates            | These variables not available in dataset                |
 
-→ 본 연구의 MLM은 논문의 통계 구조를 정확히 따르되, **연구 질문은 BOLD-ASL 모달리티 등가성 검증**으로 재정의됨.
+→ The MLM in this study follows the paper's statistical structure exactly, but the **research question is redefined as BOLD-ASL modality equivalence validation**.
 
 **Models (within-modality, subjects with REST1+REST2):**
 
@@ -143,16 +143,16 @@ MSE_diff ~ Timescale + MSE_pre + (1 + Timescale | subject),  corAR1(~ timescale 
 pip install numpy scipy pandas matplotlib nilearn nibabel statsmodels
 ```
 
-**R (AR(1) MLM, 논문 exact match):**
+**R (AR(1) MLM, exact match to paper):**
 
 ```bash
-# Windows: winget으로 자동 설치
+# Windows: install via winget
 winget install --id RProject.R
-# R은 nlme 패키지를 기본 내장 — 추가 설치 불필요
-# bold_asl_run.py가 %LOCALAPPDATA%\Programs\R\에서 Rscript를 자동 탐지함
+# R ships with nlme built-in — no additional packages needed
+# bold_asl_run.py auto-detects Rscript under %LOCALAPPDATA%\Programs\R\
 ```
 
-> R 미설치 시 statsmodels fallback으로 자동 전환 (경고 없이 진행됨).
+> If R is not installed, the pipeline silently falls back to statsmodels.
 
 ---
 
@@ -219,19 +219,19 @@ python bold_asl_run.py --method mse --max_scale 4
 
 ## Implementation Coverage vs Paper
 
-| Section                 | 논문 명세                                                         | 구현 상태                                | 비고                                                |
-| ----------------------- | ----------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------- |
-| **2.4 전처리**          | SPM12 unwarping, MELODIC ICA denoising, ANTs normalization        | ✅ **완료** (데이터 수령 시 이미 적용됨) | `swrdr63real_` prefix = 전처리 완료 파일            |
-| **2.5 Dual Regression** | FSL `dual_regression` Step 1: $T = (S^\top S)^{-1} S^\top Y^\top$ | ✅ **완료**                              | `np.linalg.lstsq` 로 동일하게 구현                  |
-| **2.5 RSN Atlas**       | Smith 2009 rsn10 공간지도, 10개 RSN 동시 GLM                      | ✅ **완료**                              | `nilearn.datasets.fetch_atlas_smith_2009()`         |
-| **2.6 MSE 파라미터**    | m=2, r=0.5×SD(원본), scales 1–7 (N/25 heuristic)                  | ✅ **완료** (스케일 6으로 적응)          | 63TR에서 N/25=2.5 → N/10=6으로 조정, rcMSE로 안정화 |
-| **2.6 rcMSE 확장**      | (논문은 표준 MSE 사용) τ-offset pooling으로 NaN 제거              | ✅ **완료** (Wu et al. 2014 추가 적용)   | ASL 63TR에서 NaN 0건 달성                           |
-| **2.7 MLM 구조**        | Random intercept + slope, ML estimation, MSE_pre 공변량           | ✅ **완료**                              | R `nlme` + Python fallback                          |
-| **2.7 AR(1) 자기상관**  | `corAR1(form = ~ timescale \| subject)` via R `nlme`              | ✅ **완료**                              | `bold_asl_mlm_ar1.R` → R 4.5.3 + nlme               |
-| **2.7 주요 예측변수**   | Age, Memory Accuracy, Sex, Premorbid IQ                           | ❌ **해당 없음**                         | 본 데이터에 없는 변수 — 연구 질문 자체가 다름       |
-| **실험 설계**           | REST_pre → 기억 인코딩 과제 → REST_post (같은 날)                 | ❌ **해당 없음**                         | REST1/REST2 = 별도 세션, 인코딩 과제 없음           |
+| Section                   | Paper specification                                               | Status                                   | Notes                                                   |
+| ------------------------- | ----------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| **2.4 Preprocessing**     | SPM12 unwarping, MELODIC ICA denoising, ANTs normalization        | **Complete** (applied prior to delivery) | `swrdr63real_` prefix = preprocessed files              |
+| **2.5 Dual Regression**   | FSL `dual_regression` Step 1: $T = (S^\top S)^{-1} S^\top Y^\top$ | **Complete**                             | Implemented via `np.linalg.lstsq`                       |
+| **2.5 RSN Atlas**         | Smith 2009 rsn10 spatial maps, 10-RSN simultaneous GLM            | **Complete**                             | `nilearn.datasets.fetch_atlas_smith_2009()`             |
+| **2.6 MSE parameters**    | m=2, r=0.5×SD(original), scales 1–7 (N/25 heuristic)              | **Complete** (adapted to scale 6)        | 63TR: N/25=2.5 → N/10=6; NaN eliminated via rcMSE       |
+| **2.6 rcMSE extension**   | (paper uses standard MSE) τ-offset pooling to remove NaN          | **Complete** (Wu et al. 2014 applied)    | Zero NaN achieved on ASL 63TR                           |
+| **2.7 MLM structure**     | Random intercept + slope, ML estimation, MSE_pre covariate        | **Complete**                             | R `nlme` + Python fallback                              |
+| **2.7 AR(1) correlation** | `corAR1(form = ~ timescale \| subject)` via R `nlme`              | **Complete**                             | `bold_asl_mlm_ar1.R` → R 4.5.3 + nlme                   |
+| **2.7 Key predictors**    | Age, Memory Accuracy, Sex, Premorbid IQ                           | **Not applicable**                       | Variables absent in dataset — research question differs |
+| **Experimental design**   | REST_pre → memory encoding task → REST_post (same day)            | **Not applicable**                       | REST1/REST2 = separate sessions; no encoding task       |
 
-**구현률:** 기술적 방법론(알고리즘·통계 모형) **7/7 완료** · 실험 설계 차이는 연구 질문 차이로 재정의
+**Coverage:** All technical methodology (algorithms + statistical models) **7/7 complete** · Design difference redefined as a distinct research question
 
 ---
 

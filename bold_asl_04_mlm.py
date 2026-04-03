@@ -44,6 +44,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import warnings
 import numpy as np
 import pandas as pd
@@ -129,6 +130,17 @@ class _RResult:
         self.pvalues      = df[p_col]
 
 
+class _NullResult:
+    """Dummy result returned when all fit attempts fail or time out."""
+    converged    = False
+    ar1_used     = False
+    random_slope = False
+    fe_params    = pd.Series(dtype=float)
+    bse_fe       = pd.Series(dtype=float)
+    tvalues      = pd.Series(dtype=float)
+    pvalues      = pd.Series(dtype=float)
+
+
 def _fit_mlm_r(endog, exog_df, groups, timescale_int) -> tuple:
     """
     Call bold_asl_mlm_ar1.R via subprocess for AR(1)-correct MLM.
@@ -195,17 +207,37 @@ def _fit_mlm(endog, exog_df, groups, timescale_int=None, method="ml"):
             return res_r, rs_r
 
     # ── Path 2: statsmodels fallback (no AR(1)) ───────────────────────────────
+    def _sm_fit(mdl):
+        """Run mdl.fit() in a daemon thread; return None if >90 s elapsed."""
+        slot = [None]
+        def _run():
+            try:
+                slot[0] = mdl.fit(method=method, reml=False, disp=False,
+                                   maxiter=300)
+            except Exception:
+                pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(90)
+        return slot[0]
+
     exog_re = exog_df[["intercept", "timescale"]]
     try:
         model  = MixedLM(endog, exog_df, groups=groups, exog_re=exog_re)
-        result = model.fit(method=method, reml=False, disp=False)
-        if not result.converged:
+        result = _sm_fit(model)
+        if result is None or not result.converged:
             raise ValueError("did not converge")
         return result, True
     except Exception:
+        pass
+    try:
         model  = MixedLM(endog, exog_df, groups=groups)
-        result = model.fit(method=method, reml=False, disp=False)
-        return result, False
+        result = _sm_fit(model)
+        if result is not None:
+            return result, False
+    except Exception:
+        pass
+    return _NullResult(), False
 
 
 def _extract_fixed(result, term: str):
